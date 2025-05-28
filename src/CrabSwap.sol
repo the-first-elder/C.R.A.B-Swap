@@ -19,6 +19,7 @@ import {Currency} from "v4-core/types/Currency.sol";
 import {SwapParams} from "v4-core/types/PoolOperation.sol";
 import {CurrencySettler} from "v4-periphery/lib/v4-core/test/utils/CurrencySettler.sol";
 import {IWETH9} from "v4-periphery/src/interfaces/external/IWETH9.sol";
+import {BeforeSwapDelta, toBeforeSwapDelta} from "@uniswap/v4-core/src/types/BeforeSwapDelta.sol";
 import "@pythnetwork/pyth-sdk-solidity/IPyth.sol";
 import "@pythnetwork/pyth-sdk-solidity/PythStructs.sol";
 
@@ -44,20 +45,39 @@ contract CrabSwap {
         bytes hookData;
     }
 
+    struct ChainInfo {
+        address spokePool;
+        uint256 chainID;
+        address chainRecipient;
+    }
+
     address[] public supportedChains;
     mapping(address => string) public chainName;
-    mapping(address chain => mapping(address quote => mapping(address base => bytes32 tokenId))) public chainToTokenId;
+    mapping(address chain => ChainInfo chainInfo) public chainInfo;
+    mapping(address chain => mapping(address base => mapping(address quote => bytes32 tokenId))) public chainToTokenId;
 
     constructor(IPoolManager _manager) {
         poolManager = _manager;
     }
 
-    function addTokenInfo(address _chain, string memory _chainName, address _quote,address _base, bytes32 _tokenId)
-        external
-    {
-        chainToTokenId[_chain][_quote][_base] = _tokenId;
+    function getChainInfo(address _chain) public returns (ChainInfo memory) {
+        return chainInfo[_chain];
+    }
+
+    function addTokenInfo(
+        address _chain,
+        string memory _chainName,
+        address _quote,
+        address _base,
+        bytes32 _tokenId,
+        address _spokePool,
+        uint256 _chainID,
+        address _chainRecipient
+    ) external {
+        chainToTokenId[_chain][_base][_quote] = _tokenId;
         supportedChains.push(_chain);
         chainName[_chain] = _chainName;
+        chainInfo[_chain] = ChainInfo({spokePool: _spokePool, chainID: _chainID, chainRecipient: _chainRecipient});
     }
 
     function getBestPrice(address quote, address base) public view returns (int256 bestPrice, address chain) {
@@ -65,7 +85,7 @@ contract CrabSwap {
         address bestChain;
         for (uint256 i = 0; i < supportedChains.length; i++) {
             address chain = supportedChains[i];
-            bytes32 tokenId = chainToTokenId[chain][quote][base];
+            bytes32 tokenId = chainToTokenId[chain][base][quote];
             if (tokenId == bytes32(0)) continue; // Skip if no token ID found for this chain
 
             bytes32 priceFeedId = tokenId;
@@ -89,9 +109,12 @@ contract CrabSwap {
         external
         returns (BalanceDelta swapDelta)
     {
-        ERC20(Currency.unwrap(params.zeroForOne ? key.currency0 : key.currency1)).transferFrom(
-            msg.sender, address(this), uint256(params.amountSpecified)
-        );
+        // ERC20(Currency.unwrap(params.zeroForOne ? key.currency0 : key.currency1)).transferFrom(
+        //     msg.sender, address(this), uint256(params.amountSpecified)
+        // );
+        // ERC20(Currency.unwrap(params.zeroForOne ? key.currency0 : key.currency1)).approve(
+        //     address(poolManager), type(uint256).max
+        // );
         // Encode callback data
         bytes memory callbackData = abi.encode(CallbackData(msg.sender, key, params, hookData));
 
@@ -111,6 +134,10 @@ contract CrabSwap {
         console.log("delta0 ", delta0);
         console.log("delta 1", delta1);
 
+        if (delta0 == 0) {
+            console.log("yes");
+            return abi.encode("");
+        }
         if (delta0 < 0) {
             callbackData.key.currency0.settle(poolManager, callbackData.user, uint256(-delta0), false);
         }
@@ -119,11 +146,11 @@ contract CrabSwap {
         }
 
         if (delta0 > 0) {
-            callbackData.key.currency0.take(poolManager, callbackData.user, uint256(delta0), false);
+            callbackData.key.currency0.take(poolManager, address(this), uint256(delta0), false);
         }
 
         if (delta1 > 0) {
-            callbackData.key.currency1.take(poolManager, callbackData.user, uint256(delta1), false);
+            callbackData.key.currency1.take(poolManager, address(this), uint256(delta1), false);
         }
 
         return abi.encode(swapDelta);

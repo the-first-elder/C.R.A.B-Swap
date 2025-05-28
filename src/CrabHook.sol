@@ -26,11 +26,53 @@ import {TickMath} from "v4-core/libraries/TickMath.sol";
 import {console2} from "forge-std/console2.sol";
 import {CrabSwap} from "./CrabSwap.sol";
 
-contract CrabHook is BaseHook {
-    CrabSwap crab;
-    // Initialize BaseHook and ERC20
+interface SpokePoolInterface {
+    function deposit(
+        address recipient,
+        address originToken,
+        uint256 amount,
+        uint256 destinationChainId,
+        int64 relayerFeePct,
+        uint32 quoteTimestamp,
+        bytes memory message,
+        uint256 maxCount
+    ) external payable;
+}
 
-    constructor(IPoolManager _manager,CrabSwap _crab) BaseHook(_manager) {
+contract CrabHook is BaseHook {
+    using CurrencySettler for Currency;
+
+    CrabSwap crab;
+    address constant CurrentChainSpokePool = address(0);
+
+    struct ChainInfo {
+        address spokePool;
+        uint256 chainID;
+        address chainRecipient;
+    }
+
+    struct SwapInstruction {
+        address tokenIn;
+        address tokenOut;
+        uint256 amount;
+        address recipient;
+        uint256 minAmountOut;
+        uint256 deadline;
+    }
+
+    struct ExactInputSingleParams {
+        address tokenIn;
+        address tokenOut;
+        uint24 fee;
+        address recipient;
+        uint256 deadline;
+        uint256 amountIn;
+        uint256 amountOutMinimum;
+        uint160 sqrtPriceLimitX96;
+    }
+
+    // Initialize BaseHook and ERC20
+    constructor(IPoolManager _manager, CrabSwap _crab) BaseHook(_manager) {
         crab = CrabSwap(_crab);
     }
 
@@ -46,7 +88,7 @@ contract CrabHook is BaseHook {
             afterSwap: false,
             beforeDonate: false,
             afterDonate: false,
-            beforeSwapReturnDelta: false,
+            beforeSwapReturnDelta: true,
             afterSwapReturnDelta: false,
             afterAddLiquidityReturnDelta: false,
             afterRemoveLiquidityReturnDelta: false
@@ -58,48 +100,61 @@ contract CrabHook is BaseHook {
         override
         returns (bytes4, BeforeSwapDelta, uint24)
     {
-        (int256 bestPrice, address chain) = crab.getBestPrice(Currency.unwrap(key.currency0), Currency.unwrap(key.currency1));
-        console2.log("bestprice",bestPrice);
-        
-        // Get the current price, tick, and liquidity from the pool
-        // (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(key.toId());
-        // uint128 liquidity = poolManager.getLiquidity(key.toId());
-        // uint24 feePips = key.fee; // Retrieve the fee
+        address base = swapParams.zeroForOne ? Currency.unwrap(key.currency0) : Currency.unwrap(key.currency1);
+        address quote = swapParams.zeroForOne ? Currency.unwrap(key.currency1) : Currency.unwrap(key.currency0);
 
-        // Set target price for the swap direction
-        uint160 sqrtPriceTargetX96 = swapParams.zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1;
+        try crab.getBestPrice(base, quote) returns (int256 bestPrice, address chain) {
+            CrabSwap.ChainInfo memory info = crab.getChainInfo(chain);
 
-        // The hook must not return a delta unless `beforeSwapReturnDelta` is enabled.
-        // So we return zero deltas.
-        BeforeSwapDelta deltas = toBeforeSwapDelta(0, 0);
-        return (this.beforeSwap.selector, deltas, 0);
+            bytes memory message = abi.encode(
+                ExactInputSingleParams({
+                    tokenIn: base,
+                    tokenOut: quote,
+                    fee: 0,
+                    recipient: tx.origin,
+                    deadline: block.timestamp + 1 hours,
+                    amountIn: uint256(swapParams.amountSpecified),
+                    amountOutMinimum: uint256(swapParams.amountSpecified) - (uint256(swapParams.amountSpecified) / 10), // 10% slippage
+                    sqrtPriceLimitX96: 0 // No price limit
+                })
+            );
+
+            ERC20(base).approve(address(CurrentChainSpokePool), uint256(swapParams.amountSpecified));
+
+            (bool success,) = address(CurrentChainSpokePool).call(
+                abi.encodeWithSelector(
+                    SpokePoolInterface.deposit.selector,
+                    info.chainRecipient,
+                    base,
+                    uint256(swapParams.amountSpecified),
+                    info.chainID,
+                    500,
+                    uint32(block.timestamp),
+                    message,
+                    0
+                )
+            );
+            if (success) {
+                // Deposit worked → absorb swap so v4 doesn't run
+                console2.log("success ignoring v4");
+                int128 inAmount = int128(uint128(uint256(swapParams.amountSpecified)));
+
+                BeforeSwapDelta deltas = toBeforeSwapDelta(
+                    swapParams.zeroForOne ? -inAmount : int128(0), // token0 delta
+                    swapParams.zeroForOne ? int128(0) : -inAmount // token1 delta
+                );
+                return (this.beforeSwap.selector, deltas, 0);
+            } else {
+                console2.log("Bridge failed, falling back to v4");
+                BeforeSwapDelta deltas = toBeforeSwapDelta(0, 0);
+                return (this.beforeSwap.selector, deltas, 0);
+            }
+        } catch {
+            console2.log("exitedd");
+            BeforeSwapDelta deltas = toBeforeSwapDelta(0, 0);
+            return (this.beforeSwap.selector, deltas, 0);
+        }
     }
-
-    // function _afterSwap(
-    //     address sender,
-    //     PoolKey calldata key,
-    //     IPoolManager.SwapParams calldata swapParams,
-    //     BalanceDelta delta,
-    //     bytes calldata extraData
-    // ) internal override returns (bytes4, int128) {
-    //     console2.log("maybe");
-    //     bool stakeOnEigen = abi.decode(extraData, (bool));
-
-    //     uint256 amountReceived;
-    //     address tokenReceived;
-
-    //     if (delta.amount0() > 0) {
-    //         amountReceived = uint256(int256(delta.amount0()));
-    //         tokenReceived = Currency.unwrap(key.currency0);
-    //     } else {
-    //         amountReceived = uint256(int256(delta.amount1()));
-    //         tokenReceived = Currency.unwrap(key.currency1);
-    //     }
-    //     // console2.log("sender", sender, address(this), tx.origin);
-    //     // Store the swap info
-    //     // pendingTransfers[tx.origin] = SwapInfo({token: tokenReceived, amount: amountReceived});
-    //     return (this.afterSwap.selector, 0);
-    // }
 
     receive() external payable {}
 }

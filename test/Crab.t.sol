@@ -61,11 +61,12 @@ contract TestPointsHook is Test, Deployers {
         (token0, token1) = deployMintAndApprove2Currencies();
         MockERC20(Currency.unwrap(token0)).mint(mockUser, 50 ether);
         MockERC20(Currency.unwrap(token1)).mint(mockUser, 50 ether);
-        uint160 flags = uint160(Hooks.BEFORE_SWAP_FLAG);
+        uint160 flags = uint160(Hooks.BEFORE_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG);
         hookAddress = address(flags);
-        deployCodeTo("CrabHook.sol", abi.encode(manager,CrabSwap(crabSwap)), hookAddress);
+        deployCodeTo("CrabHook.sol:CrabHook", abi.encode(manager, CrabSwap(crabSwap)), hookAddress);
         crabHook = CrabHook(payable(hookAddress));
         MockERC20(Currency.unwrap(token0)).approve(address(crabSwap), type(uint256).max);
+        MockERC20(Currency.unwrap(token1)).approve(address(crabSwap), type(uint256).max);
 
         // (bool success, bytes memory data) = address(metaFiRouter).call{value: 1 ether}("");
         // require(success, "failed deposit");
