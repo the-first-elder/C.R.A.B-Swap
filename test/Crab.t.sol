@@ -108,7 +108,7 @@ contract TestPointsHook is Test, Deployers {
             MockERC20(Currency.unwrap(token0)).balanceOf(mockUser),
             MockERC20(Currency.unwrap(token1)).balanceOf(mockUser)
         );
-        crabSwap.swap(key2, params, "");
+        crabSwap.swap(key2, params, abi.encode(true));
         console.log(
             "after balance",
             MockERC20(Currency.unwrap(token0)).balanceOf(mockUser),

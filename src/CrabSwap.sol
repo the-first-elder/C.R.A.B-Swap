@@ -109,12 +109,10 @@ contract CrabSwap {
         external
         returns (BalanceDelta swapDelta)
     {
-        // ERC20(Currency.unwrap(params.zeroForOne ? key.currency0 : key.currency1)).transferFrom(
-        //     msg.sender, address(this), uint256(params.amountSpecified)
-        // );
-        // ERC20(Currency.unwrap(params.zeroForOne ? key.currency0 : key.currency1)).approve(
-        //     address(poolManager), type(uint256).max
-        // );
+        ERC20(Currency.unwrap(params.zeroForOne ? key.currency0 : key.currency1)).transferFrom(
+            msg.sender, address(this), uint256(params.amountSpecified)
+        );
+
         // Encode callback data
         bytes memory callbackData = abi.encode(CallbackData(msg.sender, key, params, hookData));
 
@@ -124,35 +122,43 @@ contract CrabSwap {
 
     function unlockCallback(bytes calldata data) external returns (bytes memory) {
         require(msg.sender == address(poolManager), "Only PoolManager can call");
-
         CallbackData memory callbackData = abi.decode(data, (CallbackData));
-
+        uint256 initialBalance = ERC20(
+            Currency.unwrap(callbackData.params.zeroForOne ? callbackData.key.currency0 : callbackData.key.currency1)
+        ).balanceOf(address(this));
+        bool useCrab = abi.decode(callbackData.hookData, (bool));
+        if (useCrab) {
+            console.log("Using Crab mode - skipping V4 swap");
+            return abi.encode(BalanceDeltaLibrary.ZERO_DELTA);
+        }
         // Execute the swap inside the callback
         BalanceDelta swapDelta = poolManager.swap(callbackData.key, callbackData.params, callbackData.hookData);
         int256 delta0 = swapDelta.amount0();
         int256 delta1 = swapDelta.amount1();
         console.log("delta0 ", delta0);
         console.log("delta 1", delta1);
-
-        if (delta0 == 0) {
-            console.log("yes");
-            return abi.encode("");
-        }
         if (delta0 < 0) {
-            callbackData.key.currency0.settle(poolManager, callbackData.user, uint256(-delta0), false);
+            callbackData.key.currency0.settle(poolManager, address(this), uint256(-delta0), false);
         }
         if (delta1 < 0) {
-            callbackData.key.currency1.settle(poolManager, callbackData.user, uint256(-delta1), false);
+            callbackData.key.currency1.settle(poolManager, address(this), uint256(-delta1), false);
         }
-
         if (delta0 > 0) {
-            callbackData.key.currency0.take(poolManager, address(this), uint256(delta0), false);
+            callbackData.key.currency0.take(poolManager, callbackData.user, uint256(delta0), false);
         }
-
         if (delta1 > 0) {
-            callbackData.key.currency1.take(poolManager, address(this), uint256(delta1), false);
+            callbackData.key.currency1.take(poolManager, callbackData.user, uint256(delta1), false);
         }
-
+        uint256 finalBalance = ERC20(
+            Currency.unwrap(callbackData.params.zeroForOne ? callbackData.key.currency0 : callbackData.key.currency1)
+        ).balanceOf(address(this));
+        if (initialBalance - finalBalance > 0) {
+            ERC20(
+                Currency.unwrap(
+                    callbackData.params.zeroForOne ? callbackData.key.currency0 : callbackData.key.currency1
+                )
+            ).transfer(callbackData.user, initialBalance - finalBalance);
+        }
         return abi.encode(swapDelta);
     }
 
